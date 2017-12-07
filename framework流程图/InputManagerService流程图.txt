@@ -1,0 +1,19 @@
+InputManagerService流程图
+
+SystemService
+	-->initAndLoop()//启动系统服务
+		-->addServcie(new InputManagerService())//流程输入管理服务
+			-->nativeInit()
+				-->new NativeInputManager()并保存指针到Java层,实现InputReaderPolicyInterface和InputDispatcherPolicyInterface
+					-->new EventHub()
+					-->new InputManager();传入InputReaderPolicyInterface和InputDispatcherPolicyInterface
+						-->new InputDispatcher()-->传入到InputDispatcherThread()
+						-->new InputReader()-->传入到InputReaderThread()
+						-->initialize()//创建两个线程处理Reader和Dispatcher							
+		-->InputManagerService.start()//启动IMS
+			-->Reader.threadLoop()
+				-->mEventHub->getEvents()
+				-->processEventsLocked()//加工处理原始数据并保存到mQueuedListener
+				-->mQueuedListener.flush()//将事件提交给dispatcher
+			-->Dispatcher.threadLoop()
+			
