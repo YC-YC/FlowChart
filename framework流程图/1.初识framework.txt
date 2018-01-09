@@ -1,0 +1,9 @@
+一、编译指令：
+	1、make:不带参数，编译整个系统
+	2、make模块：编译模块，但会依赖的模块也一起编译，如make libmedia,会把libmedia依赖的库全部编译
+	3、mmm package/providers/MediaProvider:编译指令目录下的目标模块，而不编译它所依赖的模块（和mm一样，mm需要切到相应目录下再执行）
+	4、以上命令都是增量编译，但都可通过 -B 来强制编译
+	
+二、JNI
+	1、JNIEnv是一个线程相关代表JNI环境的结构体，每个线程有一个
+	2、JavaVM进程的代表，可通过AttachCurrentThread获取当前线程的JNIEvn，需要调用DetachCurrentThread来释放资源
