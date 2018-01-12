@@ -25,6 +25,7 @@
 	action_for_each_trigger("early-boot", action_add_queue_tail);     
 	action_for_each_trigger("boot", action_add_queue_tail);
 		--启动zygote -- 运行/system/bin/app_process
+		--打开socket,同时public出去(ANDROID_SOCKET_zygote)
 		service zygote /system/bin/app_process -Xzygote /system/bin --zygote --start-system-server
 		class main
 		socket zygote stream 660 root system

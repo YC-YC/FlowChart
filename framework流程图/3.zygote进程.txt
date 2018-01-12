@@ -1,0 +1,54 @@
+init进程运行/system/bin/app_process
+App_main.cpp
+	main()
+		AppRuntime(AndroidRuntime).start("com.android.internal.os.ZygoteInit", "start-system-server")
+			startVm() -- 启动虚拟机
+				获取一些属性
+				JNI_CreateJavaVM()
+			startReg() -- 注册jni函数(添加相关函数到一个数组里面，再执行相关的函数)
+			调用ZygoteInit.java的main函数
+				registerZygoteSocket(); -- 注册zygote用的socket
+					System.getenv(ANDROID_SOCKET_ENV) -- 获取init进入启动service时创建的socket
+					LocalServerSocket()
+				preload(); -- 预加载
+					preloadClasses();
+						预加载/framwork/base/preloaded-classes文件里面的类（优化重点项）
+					preloadResources(); -- 加载framwork-res.apk里面内容
+					preloadOpenGL();
+					
+				startSystemServer();
+					Zygote.forkSystemServer() -- 创建SystemService进程
+					handleSystemServerProcess()
+						closeServerSocket(); -- 关闭zygote继承下来的socket
+						RuntimeInit.zygoteInit()
+							nativeZygoteInit();
+								AppRuntime.onZygoteInit()
+									创建线程池，用于Binder通信
+							invokeStaticMain() -- 执行com.android.server.SystemServer的main
+								抛出一个异常
+				
+				runSelectLoop();
+					添加创建的LocalServerSocket到一个数组
+					while()
+						index  = selectReadable()--监听数组数据变化，多路利用（select机制）,当客户端有数据连接时会返回
+						if(有客户端连接上)
+							添加新的socket客户端到数组
+						else -- 为客户端有数据进入
+							runOnce -- 读取客户端请求指令
+								读取客户端启动新应用的指令
+								setSignalHandler() -- 监听子进程是否死了，如果是SystemService死了，则将zygote进程杀掉
+								fork()
+								设置子进程的一些信息
+							将客户端从数组中删除
+							
+				
+							
+				closeServerSocket();
+				
+		捕抓SystemService抛出的异常
+			执行SystemService的main() -- 为了清除前面进行的堆栈
+				 System.loadLibrary("android_servers");
+				 nativeInit();
+				 ServerThread.initAndLoop() -- 启动系统各个服务
+				 
+另外：有个WatchDog看门狗，通过线程检测添加的服务有没有死锁的情况（BatteryServicePowerManagerService,AlarmManagerService,ActivityManagerService）
