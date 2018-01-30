@@ -1,0 +1,114 @@
+Main_mediaserver.cpp
+	main()
+	
+		sp<ProcessState> proc(ProcessState::self());	--得到一个ProcessState实例(每个进程只有一个，在这里获取实例却没有调用是因为它是单例的)
+			open_driver()
+				open("/dev/binder", O_RDWR)	--打开binder设备
+				ioctl(fd, BINDER_SET_MAX_THREADS, &maxThreads); -- 设置最大访问线程为15
+			mmap(0, BINDER_VM_SIZE, PROT_READ, MAP_PRIVATE | MAP_NORESERVE, mDriverFD, 0);（1M-8k）--映射到内存
+			
+		sp<IServiceManager> sm = defaultServiceManager();  -- 获取IServiceManager实例
+        AudioFlinger::instantiate();			-- 初始化AudioFlinger并添加到ServiceManager
+        MediaPlayerService::instantiate();		-- 初始化MediaPlayerService并添加到ServiceManager
+        CameraService::instantiate();			-- 初始化CameraService并添加到ServiceManager
+        AudioPolicyService::instantiate();		-- 初始化AudioPolicyService并添加到ServiceManager
+        ProcessState::self()->startThreadPool(); -- 创建线程池，对于数据大时需要创建，数据小时可以不调用此方法
+			spawnPooledThread(true)
+				new PoolThread(true).run()
+					threadLoop
+						IPCThreadState::self()->joinThreadPool(true);
+					
+        IPCThreadState::self()->joinThreadPool();
+		
+				
+		
+ServiceManager
+		sp<IServiceManager> sm =defaultServiceManager(); -- 获取IServiceManager实例，其实是	BpServiceManager
+			interface_cast<IServiceManager>(ProcessState::self()->getContextObject(NULL))							
+				相当IServiceManager::asInterface(BpBinder(0))
+						new BpServiceManager(BpBinder(0))  -- IServiceManager和BpRefBase的实现类， BpBinder(0)保存到BpRefBase的mRemote变量中
+						
+			ProcessState::self()->getContextObject(NULL)
+				getStrongProxyForHandle(0) -- 参数handler一般为某个数组的index
+				
+					lookupHandleLocked(0)
+					BpBinder(0) ---创建一个BpBinder（Binder的客户端）
+		
+		addService(String16& name, sp<IBinder>& service)
+				remote()->transact(ADD_SERVICE_TRANSACTION, data, &reply) --通过BpBinder传输数据
+				
+		getService(const String16& name)
+				remote()->transact(CHECK_SERVICE_TRANSACTION, data, &reply) --通过BpBinder传输数据
+		
+		BpBinder::transact()
+			IPCThreadState::self()->transact( mHandle, code, data, reply, flags); -- IPCThreadState是每个线程有一个，保存线程独有的数据,mIn/mOut分别用来接收和发送Binder数据
+				writeTransactionData() -- 填充数据到binder_transaction_data，通过mOut.write
+				waitForResponse()
+					talkWithDriver()
+						将mIn/mOut填充到binder_write_read
+						ioctl(mProcess->mDriverFD, BINDER_WRITE_READ, &bwr)
+					
+	
+BpBinder和BBinder都有IBinder继承过来，BpBinder属于客户端，BBinder属于服务端，两都通过handle值在Binder系统中查找匹配关系
+
+定义接口类型转换模板
+template<typename INTERFACE>
+inline sp<INTERFACE> interface_cast(const sp<IBinder>& obj)
+{
+    return INTERFACE::asInterface(obj);
+}
+
+定义接口类函数
+#define DECLARE_META_INTERFACE(INTERFACE)                               \
+    static const android::String16 descriptor;                          \
+    static android::sp<I##INTERFACE> asInterface(                       \
+            const android::sp<android::IBinder>& obj);                  \
+    virtual const android::String16& getInterfaceDescriptor() const;    \
+    I##INTERFACE();                                                     \
+    virtual ~I##INTERFACE();                                            \
+
+宏定义接口实现
+#define IMPLEMENT_META_INTERFACE(INTERFACE, NAME)                       \
+    const android::String16 I##INTERFACE::descriptor(NAME);             \
+    const android::String16&                                            \
+            I##INTERFACE::getInterfaceDescriptor() const {              \
+        return I##INTERFACE::descriptor;                                \
+    }                                                                   \
+    android::sp<I##INTERFACE> I##INTERFACE::asInterface(                \
+            const android::sp<android::IBinder>& obj)                   \
+    {                                                                   \
+        android::sp<I##INTERFACE> intr;                                 \
+        if (obj != NULL) {                                              \
+            intr = static_cast<I##INTERFACE*>(                          \
+                obj->queryLocalInterface(                               \
+                        I##INTERFACE::descriptor).get());               \
+            if (intr == NULL) {                                         \
+                intr = new Bp##INTERFACE(obj);                          \
+            }                                                           \
+        }                                                               \
+        return intr;                                                    \
+    }                                                                   \
+    I##INTERFACE::I##INTERFACE() { }                                    \
+    I##INTERFACE::~I##INTERFACE() { }                                   \
+
+	
+Binder的服务端servicemanager
+Service_manager.c
+	main()
+		binder_state *bs = binder_open(128*1024)
+			 open("/dev/binder", O_RDWR)
+			 mmap
+		
+		binder_become_context_manager(bs)
+			ioctl(bs->fd, BINDER_SET_CONTEXT_MGR, 0)
+		
+		binder_loop(svcmgr_handler)
+			binder_write() //ioctl BC_ENTER_LOOPER
+			for()
+				ioctl(bs->fd, BINDER_WRITE_READ, &bwr)
+				binder_parse -- svcmgr_handler处理信息
+					do_add_service()
+		
+
+
+
