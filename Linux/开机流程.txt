@@ -1,0 +1,60 @@
+开机流程
+
+BIOS --> 进入Boot Loader --> 加载内核 -->内核初始化 -->启动初始化进程（Linux第一个进程，systemd初始化进程，7.0之前的版本是System V init）
+
+1、上电
+2、BIOS自检
+	a、上电自检POST(Power-On Self Test),主要检测系统外围关键设备（如CPU、内存、显卡、I/O等）
+	b、执行一段小程序枚举本地设备并对其初始化，主要是根据BIOS中设置的系统启动顺序启动系统驱动器（如硬盘）
+		执行驱动器的第一个扇区（0头0道1扇区，MBR，512字节），然后执行里面的代码
+		MBR--Master Boot Recorder,主引导扇区，由主引导程序（Bootloader）(446B，grub的stage1代码)、硬盘分区表DPT（64B）和硬盘有效标志（55AA)（2B）组成		
+3、系统引导lilo/grub（安装在MBR里面）
+	stage1:
+		BIOS将Bootloader里面代码，即grub的stage1（/stage1/start.S）载入到内存0x7C00处并中转执行;
+		调用 BIOS INIT13 中断，将第二扇区（0头0道2扇区,内容是/stage2/start.S,编译后的512字节）读入到内存0x7000，然后调用copy_buffer将其转移到0x8000
+		/stage2/start.S负责将stage1.5或stage2从硬盘读到内存
+		如果start.S加载stage1.5，stage1.5有识别文件系统的能力，grub去访问 /boot/grub 目录下的 stage2 文件，将 stage2 载入内存0x2200处并执行
+		如果start.S加载stage2，start.S读取的是/boot分区Boot Sector的stage2
+	stage2:
+		解析grub配置文件/boot/grub/grub.conf
+		加载内核到内存中，开始执行内核
+4、启动内核
+	初始化系统中各设备并做相关的配置工作，其中包括CPU、I/O、存储设备等
+	内核组成：
+	1、包含最基本的硬件驱动
+	2、以模块的方式放在initrd(ramdisk)中
+	系统在安装过程中，会检测系统硬件信息。根据安装信息和系统硬件信息，将一部分驱动写入到initrd,这样，在系统启动时，通过initrd加载一些驱动
+	
+	initrd:Bootloader initialized RAM Dick,由BootLoader初始化的内存盘，bootloader 会将存储介质中的initrd文件加载到内存，内核启动时，会在访问真正的根文件前
+		先访问initrd文件系统。先执行initrd文件系统中的init，完成加载驱动模块等任务；再执行真正的根文件系统中的/sbin/init(系统初始化第1号进程)
+		
+	initrdfs:内核镜像中的附加的一个cpio包，这个cpio包中包含了一个小的文件系统。当内核启动时，内核将这个cpio包解开，并且将其中包含的文件系统释放到rootfs中，
+		内核中的一部分初始化代码就在这里执行
+	
+	执行流程：
+	1、内核执行initrd中的init脚本，加载各种存储介质相关的驱动程序，并为设备在根目录rootfs创建一个根设备
+	2、转到根文件系统上面，运行/sbin/init作为第1号进程
+	
+5、初始化系统
+	1、执行/etc/inittab文件加载相应的脚本进行系统初始化，如设置键盘、字体、装载模块、设置网络等
+		1、执行系统初始化脚本（/etc/rc.d/rc.sysinit）对系统进行基本配置，以读写方式挂载根文件系统及其它文件系统
+			（1）获取网络环境与主机类型。首先会读取网络环境设置文件”/etc/sysconfig/network”，获取主机名称与默认网关等网络环境。
+			（2）测试与载入内存设备 / proc 及 usb 设备 / sys。除了 / proc 外，系统会主动检测是否有 usb 设备，并主动加载 usb 驱动，尝试载入 usb 文件系统。
+			（3）决定是否启动 SELinux。
+			（4）接口设备的检测与即插即用（pnp）参数的测试。
+			（5）用户自定义模块的加载。用户可以再”/etc/sysconfig/modules/*.modules” 加入自定义的模块，此时会加载到系统中。
+			（6）加载核心的相关设置。按”/etc/sysctl.conf” 这个文件的设置值配置功能。
+			（7）设置系统时间（clock）。
+			（8）设置终端的控制台的字形。
+			（9）设置 raid 及 LVM 等硬盘功能。
+			（10）以方式查看检验磁盘文件系统。
+			（11）进行磁盘配额 quota 的转换。
+			（12）重新以读取模式载入系统磁盘。
+			（13）启动 quota 功能。
+			（14）启动系统随机数设备（产生随机数功能）。
+			（15）清楚启动过程中的临时文件。
+			（16）将启动信息加载到”/var/log/dmesg” 文件中。
+		2、执行/etc/rc.d/rc脚本，根据优先级，去执行/etc/rc.d/rc*.d（*=0-6）下面的文件（文件以K或S开头）
+		3、执行自定义引导程序/etc/rc.d/rc.local
+		4、进入登录界面等待登录
+		

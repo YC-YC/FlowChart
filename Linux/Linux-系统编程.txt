@@ -1,0 +1,550 @@
+一、
+系统编程三大基石：
+系统调用：为了从操作系统获得服务或资源而从用户向内核发起的函数调用 
+C库：(glib C,提供了核心服务和方便的系统调用及基本的应用工具)
+C编译器：(gcc)
+API：应用程序接口
+ABI：应用程序二进制接口，每个硬件架构都实现自己的二进制接口，在编译的时候以选择相应的功能
+文件：
+	Linux一切都是文件，同一个文件可以被不同或者相同的进程多次打开并进行文件读写，但顺序是不可测的，需要用户层自己保证两步时序
+内核通过inode标记一个文件，但应用通过文件名访问文件，再经过内核转换到相应的inode点进行访问（链接，也可以指定多个路径链接到同一个inode，称为硬链接）
+字符设备文件、块设备文件、管道设备文件、套接字设备文件
+
+读写操作注意返回值，errno， 一般要处理的errno为EINTE,即操作过程中，被其它中断断开，收到信息后可以重新再操作
+
+完整读示例：
+ssize_t ret;
+while (len != 0 && (ret = read (fd, buf, len)) != 0) {
+	if (ret == -1) {
+		if (errno == EINTR){
+			continue;
+		}
+
+		perror (”read”);
+		break;
+	}
+	len -= ret;
+	buf += ret;
+}
+
+完整写示例：
+ssize_t ret, nr;
+while (len != 0 && (ret = write (fd, buf, len)) != 0) {
+	if (ret == -1) {
+		if (errno == EINTR)
+			continue;
+		perror (”write”);
+		break;
+	}
+	len -= ret;
+	buf += ret;
+}
+
+IO同步：
+	1、write数据内核会先写到一个buffer里面，等到时机到时再写到磁盘，read也会先从buffer里看有没有数据，如果有就直接从buffer里返回
+		内核通过/proc/sys/vm/dirty_expire_centiseconds配置写入的时间，
+	2、也可通过“IO同步”，即fsync()和fdatasync(),但也只是保证数据保存到磁盘上，数据还有可能在磁盘驱动器的缓存上（不过这个时间是极快的）
+		这两个函数并不保证任何已经更新的包含该文件的目录项同步到磁盘上，必需对目录本身也调用fsync()进行同步
+		sync()系统调用可以用来对磁盘上所有缓冲区进行同步，对于一个繁忙的系统，整个sync过程可能需要消耗几分钟
+	3、可以在打开文件的时候设置flag为O_SYNC 
+直接IO：
+	尽量避过内核复杂的IO处理，可在open的时候使用O_DIRECT设置flag，但请求长度和文件偏移必须是设备扇区大小的整数倍（一般为512字节）
+	
+	int open (const char *name, int flags);
+	int open (const char *name, int flags, mode_t mode);
+	
+	ssize_t read (int fd, void *buf, size_t len);
+	ssize_t write (int fd, const void *buf, size_t count);
+	int fsync (int fd);
+	int fdatasync (int fd);
+	int close (int fd);
+	off_t lseek (int fd, off_t pos, int origin);
+	ssize_t pread (int fd, void *buf, size_t count, off_t pos);//定位读
+	ssize_t pwrite (int fd, const void *buf, size_t count, off_t pos);//定位写
+	
+	int ftruncate (int fd, off_t len);截短文件，也可增加文件（len>文件大小）
+	int truncate (const char *path, off_t len);
+	
+IO多路复用：
+	同时允许多个文件符阻塞，并在某个文件可读时收到通知。
+	
+	1、select()、pselect()
+	
+	示例：
+	
+	fd_set readfds;
+	int ret;
+
+	FD_ZERO(&readfds);
+	FD_SET(STDIN_FILENO, &readfds);
+	tv.tv_sec = TIMEOUT;
+	tv.tv_usec = 0;
+	while(true){
+		//设最大值，最大值为1024，实际是每个文件描述符占用一个byte，
+		//调用这个函数会调用kernal的copy_from_user，如果fd比较多的，消耗资源比较大
+		ret = select (STDIN_FILENO + 1, &readfds, NULL, NULL, &tv);
+		if (ret == -1) {
+		perror (”select”);
+			return 1;
+		} else if (!ret) {
+			printf (”%d seconds elapsed.\n”, TIMEOUT);
+			return 0;
+		}
+
+		if (FD_ISSET(STDIN_FILENO, &readfds)) {
+			char buf[BUF_LEN+1];
+			int len;
+			/* guaranteed to not block */
+			len = read (STDIN_FILENO, buf, BUF_LEN);
+			if (len == -1) {
+				perror (”read”);
+				return 1;
+			}
+			if (len) {
+				buf[len] = ’\0’;
+				printf (”read: %s\n”, buf);
+			}
+			return 0;
+		}
+	}
+	
+	可改进成一个精度较高的sleep功能，如：
+	struct timeval tv;
+	tv.tv_sec = 0;
+	tv.tv_usec = 500;
+	/* sleep for 500 microseconds */
+	select (0, NULL, NULL, NULL, &tv);
+
+
+	2、poll()、ppoll()
+	
+	示例：
+	struct pollfd fds[2];
+	int ret;
+	fds[0].fd = STDIN_FILENO;
+	fds[0].events = POLLIN;
+	fds[1].fd = STDOUT_FILENO;
+	fds[1].events = POLLOUT;
+	while(true){
+		ret = poll (fds, 2, TIMEOUT * 1000);
+		if (ret == -1) {
+			perror (”poll”);
+			return 1;
+		}
+		if (!ret) {
+			printf (”%d seconds elapsed.\n”, TIMEOUT);
+			return 0;
+		}
+		if (fds[0].revents & POLLIN){
+			printf (”stdin is readable\n”);
+		}
+		if (fds[1].revents & POLLOUT){
+			printf (”stdout is writable\n”);
+		}
+	}
+	
+	return 0;
+	
+二、	
+虚拟文件系统：
+	允许内核无需了解文件类型的情况下，使用文件系统函数调用和操作文件系统数据
+页缓存：
+	（引用局部性）
+	在内存中保存最近在磁盘文件系统上访问过的数据。内核在页缓存区先找数据，如果找不到再到磁盘上找。页缓存区的大小是不定的，会随着访问文件内容的增加而增加
+	同时内存也实现将内存中一些很少用到的数据交换到磁盘上，实现内存空间比实际内存数更大
+	交换和缓存间的平衡通过 /proc/sys/vm/swappiness来配置，值（0-100）越大，说明更倾向于在内存中保留页缓存，更低值表示更倾向于清理页缓存
+	
+	（空间局部性）
+	内存从磁盘读数据时会多读一些数据，从而减少磁盘的寻道时间
+	
+页回写：
+	内核使用缓存区来延时写操作。
+	当空闲内存小于设定值时，缓冲区就会写到磁盘；当缓冲区寿命超过设定值时，缓冲区被回写到磁盘。
+	
+缓冲输入输出(在用户空间建立一个缓存，由C库在用户空间维护，不同于内核的页缓存)
+	磁盘操作都是基于块整数倍大小进行的。1024次每1字节比一次读1024明显会慢很多
+	标准IO（带用户缓存功能的标准C库），操作的是流（FILE文件指针，内部映射到一个文件描述符）
+	
+	FILE* fopen(const char * path, const char * mode);
+	
+	//将open打开的文件描述符转成FILE文件指针
+	FILE * fdopen (int fd, const char *mode);	
+	
+	
+	int fclose (FILE *stream);
+	int fcloseall (void);
+	
+	//单字节读取
+	int fgetc (FILE *stream); 
+	
+	//读行
+	char * fgets (char *str, int size, FILE *stream); //读行，从流中读取size-1个字节的数据，保存到str里，当读到EOF或者换行符时结束读入（如果在换行符，“\n”会被写入到str尾）
+
+	//fgetc()改造成读取任意字节（限定长度）
+	char *s;
+	int c;
+	s = str;
+	while (--n > 0 && (c = fgetc (stream)) != EOF)
+		*s++ = c;
+	*s = ’\0’;
+	
+	//fgetc()改造成读取到指定字符d
+	char *s;
+	int c = 0;
+	s = str;
+	while (--n > 0 && (c = fgetc (stream)) != EOF &&
+		(*s++ = c) != d)
+		;
+	if (c == d)
+		*--s = ’\0’;
+	else
+		*s = ’\0’;
+	
+	//读取二进制文件
+	size_t fread (void *buf, size_t size, size_t nr, FILE *stream);//读取二进制文件，从流中读取nr个数据，每个数据大小为size,读取到的数据保存到buf里面
+	
+	char buf[64];
+	size_t nr;
+	nr = fread (buf, sizeof(buf), 1, stream);
+	if (nr == 0)
+		/* error */
+	
+	//写入单字节
+	int fputc (int c, FILE *stream);
+	
+	//写入字符串
+	int fputs (const char *str, FILE *stream);
+	
+	stream = fopen (”journal.txt”, ”a”);
+	if (!stream)
+		/* error */
+	if (fputs (”The ship is made of wood.\n”, stream) == EOF)
+		/* error */
+	if (fclose (stream) == EOF)
+		/* error */
+	
+	//写入二进制文件
+	size_t fwrite (void *buf, size_t size, size_t nr, FILE *stream);//把指向buf的nr个元素（每个元素大小为size）写入到文件
+	
+注：
+	二进制文件操作时，因为读写的元素需要字节对齐，对于不同机器可能不一样，需要小心
+	
+	//定位
+	int fseek (FILE *stream, long offset, int whence);
+	int fsetpos (FILE *stream, fpos_t *pos); //和fseek(,,SEEK_SET)一样
+	void rewind (FILE *stream); //和fseek(,0, SEEK_SET)一样
+	
+	//获取当前位置
+	long ftell (FILE *stream);
+	
+	//清洗流
+	int fflush (FILE *stream); //将用户缓冲区数据写入到内核，调用系统调用write()，可在该函数后再调用fsync()同步到磁盘
+	
+	//文件错误和文件结束
+	有些文件流函数不能直接通过返回值获取出错或异常信息，如fread()的返回值比设定的元素个数少时，可使用ferror()和feof()来判断
+	是否操作异常，还是到了文件结尾
+	void clearerr (FILE *stream);用于清除ferror()和feof()这两个函数的异常信息
+	
+	
+	//获取流关联的文件描述符
+	int fileno (FILE *stream);
+	
+
+缓冲类型有：
+	不缓冲：直接提交到内核，通常不用
+	行缓冲：缓冲以行为单位，终端的默认缓冲方式
+	块缓冲：以块为单位，默认所有和文件相关的流都是块缓冲
+	int setvbuf (FILE *stream, char *buf, int mode, size_t size);
+	
+线程安全：
+	标准IO内部通过加锁，实现了IO的线程安全，但如果想要块同步，可通过调用标准函数来实现。
+	void flockfile (FILE *stream);
+	void funlockfile (FILE *stream);
+	
+	
+三、高级文件IO（Linux实现）
+散布、聚集IO：单次系统调用中操作多个缓冲区的IO，可以将单个数据流的内容写到多个缓冲区，也可以把单次读到多个缓冲区中
+	ssize_t readv (int fd, const struct iovec *iov, int count);
+	ssize_t writev (int fd, const struct iovec *iov, int count);
+
+多路复用之epoll,比select和poll更高效，特别是在监听大量文件时
+	int epoll_create (int size) //创建一个epoll实例，size不需要传一个确切的数
+	int epoll_ctl (int epfd, int op, int fd, struct epoll_event *event); //控制 epoll，op指定Add/Delete/Mod
+	int epoll_wait (int epfd, struct epoll_event *events, int maxevents, int timeout); //等待epoll事件
+边沿触发和水平触发
+	边沿触发：文件即使可读，不会立即触发，而是等待另一端写完成才触发，可通过epoll_ctl设置event值为EPOLLE来实现
+	水平触发：文件可读就触发。是默认行为，也是poll和select的行为
+存储映射
+	将文件映射到内存，从而使操作文件像操作内存一样
+	void * mmap (void *addr, size_t len, int prot, int flags, int fd, off_t offset);//请求内核将fd的offset处开始的len个字节数据映射到内存中，add只是一个参考映射地址，并不强制
+页大小：内存中允许具有不同权限和行为的最小单元，是内存映射的基本块。mmap是size必需是页大小的整数倍。
+	可通过sysconf (_SC_PAGESIZE)或者getpagesize()或者PAGE_SIZE来获取
+	int munmap (void *addr, size_t len);//取消映射
+	void * mremap (void *addr, size_t old_size, size_t new_size, unsigned long flags); //重新调整映射大小
+	int mprotect (const void *addr, size_t len, int prot);//改变权限
+	int msync (void *addr, size_t len, int flags);//同步内存中的映射和被映射的文件
+
+提示：可提升普通应用效率
+	映射提示
+	int madvise (void *addr, size_t len, int advice);
+	普通文件IO提示
+	int posix_fadvise (int fd, off_t offset, off_t len, int advice);
+	ssize_t readahead (int fd, off64_t offset, size_t count);
+
+四、进程
+	pid_t getpid (void);
+	pid_t getppid (void);
+	运行新进程
+	1、exec系列系统调用
+		将二进制文件的程序映像载入到内存，替换原先进程的地址空间，并开始运行它
+		int execl (const char *path, const char *arg, ...);
+		int execlp (const char *file, const char *arg, ...);
+		int execle (const char *path, const char *arg, ..., char * const envp[]);
+		int execv (const char *path, char *const argv[]);
+		int execvp (const char *file, char *const argv[]);
+		int execve (const char *filename, char *const argv[], char *const envp[]);
+		
+		l和v分别表示参数以列表和数组的方式提供、p意味着在用户的PATH环境中寻找可执行文件、e表示提供给新进程以新的环境变量
+		
+	2、fork()
+		创建一个新的进程，基本上是复制父进程的数据（共享父进程的起始页，实际用到时才复制，叫写时复制），并立即执行一个新进程（子进程返回0，父进程返回子进程的pid）
+		//挂起父进程进到子进程完成或者执行一个新的可执行映像
+		pid_t vfork (void);
+		//退出进程（子进程会向父进程发送一个SIGCHLD信号）
+		void exit (int status);
+		1、C语言内部会逆序调用atexit()或on_exit()注册的函数
+		2、清空所有打开的标准IO流
+		3、删除由tmpfile()创建的临时文件
+		完成这些用户清除工作后，调用_exit()让内核清理退出进程的剩余工作（申请的内存，打开的文件和System V的信号量）
+		（应用可以调用_exit(),但一般不合适；vfork()的使用者必需调用_exit()而不是exit()）
+		
+		int atexit (void (*function)(void));//注册进程正常退出时的回调函数
+		int on_exit (void (*function)(int , void *), void*arg);
+		
+		//等待子进程终止
+		pid_t wait (int *status);
+		//等待指定子进程终止
+		pid_t waitpid (pid_t pid, int *status, int options);
+		int waitid (idtype_t idtype, id_t id, siginfo_t *infop, int options);
+		int system (const char *command);
+
+		
+五、文件
+	获取文件信息
+	int stat (const char *path, struct stat *buf);
+	int fstat (int fd, struct stat *buf);
+	int lstat (const char *path, struct stat *buf);
+	权限
+	int chmod (const char *path, mode_t mode);
+	int fchmod (int fd, mode_t mode);
+	所有者
+	int chown (const char *path, uid_t owner, gid_t group);
+	int lchown (const char *path, uid_t owner, gid_t group);
+	int fchown (int fd, uid_t owner, gid_t group);
+	扩展属性
+	获取
+	ssize_t getxattr (const char *path, const char *key, void *value, size_t size);
+	ssize_t lgetxattr (const char *path, const char *key, void *value, size_t size);
+	ssize_t fgetxattr (int fd, const char *key, void *value, size_t size);
+	设置
+	int setxattr (const char *path, const char *key, const void *value, size_t size, int flags);
+	int lsetxattr (const char *path, const char *key, const void *value, size_t size, int flags);
+	int fsetxattr (int fd, const char *key, const void *value, size_t size, int flags);
+	列出
+	ssize_t listxattr (const char *path, char *list, size_t size);
+	ssize_t llistxattr (const char *path, char *list, size_t size);
+	ssize_t flistxattr (int fd, char *list, size_t size);
+	删除
+	int removexattr (const char *path, const char *key);
+	int lremovexattr (const char *path, const char *key);
+	int fremovexattr (int fd, const char *key);
+	获取当前路径
+	char * getcwd (char *buf, size_t size);
+	char * get_current_dir_name (void);
+	char * getwd (char *buf);
+	改变当前工作目录
+	int chdir (const char *path);
+	int fchdir (int fd);
+	创建目录
+	int mkdir (const char *path, mode_t mode);
+	删除目录
+	int rmdir (const char *path);
+	读取目录内容
+	DIR * opendir (const char *name);
+	int dirfd (DIR *dir);
+	struct dirent * readdir (DIR *dir);
+	int closedir (DIR *dir);
+	复制--没有系统调用
+	移动
+	int rename (const char *oldpath, const char *newpath);
+	
+	监视文件事件（inotify）
+	初始化inotify
+	int inotify_init (void);
+	添加新监视
+	int inotify_add_watch (int fd, const char *path, uint32_t mask);
+	读取inofity事件
+	read()--可获取触发事件的个数，可通过select,poll,epoll监视它，进行多路复用传输inotify
+	删除监视
+	int inotify_rm_watch (int fd, uint32_t wd);
+	销毁
+	close(int fd);
+	
+内存管理
+	分配（分配的内容是不定的）
+	void *malloc (size_t size);
+	数组分配（分配的内容已经初始化为0）
+	void *calloc (size_t nr, size_t size);
+	重新分配
+	void *realloc (void *ptr, size_t size);
+	释放
+	void free (void *ptr);
+	
+	栈中分配内存，分配后不用释放
+	void * alloca (size_t size);
+	栈中复制串
+	char * strdupa (const char *s);
+	char * strndupa (const char *s, size_t n);
+	
+	字节设置
+	void * memset (void *s, int c, size_t n);
+	字节比较
+	int memcmp (const void *s1, const void *s2, size_t n);
+	字节移动
+	void * memmove (void *dst, const void *src, size_t n);
+	void * memcpy (void *dst, const void *src, size_t n);
+	void * memccpy (void *dst, const void *src, int c, size_t n);
+	void * mempcpy (void *dst, const void *src, size_t n);
+	字节搜索
+	void * memchr (const void *s, int c, size_t n);
+	void * memrchr (const void *s, int c, size_t n);
+	void * memmem (const void *haystack, size_t haystacklen, const void *needle, size_t needlelen);
+	字节加密、解密
+	void * memfrob (void *s, size_t n);//每个字节与42进行异或操作，再调一次就可以恢复
+	
+信号（打断程序原来执行部分去执行注册的信号处理函数，再恢复到原来执行的地方）
+	sighandler_t signal (int signo, sighandler_t handler);
+	等待信号
+	int pause (void);
+	
+	映射信号编号为字符串
+	1、静态列表
+	2、void psignal (int signo, const char *msg);
+	3、char *strsignal (int signo);
+	发送信号
+	int kill (pid_t pid, int signo);
+	也可以通过命令行发送如：kill -HUP 1722
+	int raise (int signo);	//给自己发送信号
+	int killpg (int pgrp, int signo); //给进程组发送
+	函数可重入：坚决不能操作静态数据
+	信号处理程序必须只使用可重入函数
+	
+	信号集
+	int sigemptyset (sigset_t *set);	//清空（所有信号都被排除在集合外）
+	int sigfillset (sigset_t *set);		//填充（所有信号都包括在集合内）
+	int sigaddset (sigset_t *set, int signo);	//添加
+	int sigdelset (sigset_t *set, int signo);	//删除
+	int sigismember (const sigset_t *set, int signo);	//是否在集合内
+	阻塞信号（解决重入问题）
+	被阻塞的信号叫做该进程的信号掩码
+	int sigprocmask (int how, const sigset_t *set, sigset_t *oldset);
+	获取待处理信号
+	int sigpending (sigset_t *set);
+	等待信号集
+	int sigsuspend (const sigset_t *set);
+	高级信号管理
+	int sigaction (int signo, const struct sigaction *act, struct sigaction *oldact);
+	发送附加信息
+	int sigqueue (pid_t pid, int signo, const union sigval value);
+
+时间
+	
+	时间结构体
+	typedef long time_t;
+	
+	struct timeval {
+		time_t tv_sec; /* seconds */
+		suseconds_t tv_usec; /* microseconds */
+	};
+	
+	struct timespec {
+		time_t tv_sec; /* seconds */
+		long tv_nsec; /* nanoseconds */
+	};
+	
+	struct tm {
+		int tm_sec; /* seconds */
+		int tm_min; /* minutes */
+		int tm_hour; /* hours */
+		int tm_mday; /* the day of the month */
+		int tm_mon; /* the month */
+		int tm_year; /* the year */
+		int tm_wday; /* the day of the week */
+		int tm_yday; /* the day in the year */
+		int tm_isdst; /* daylight savings time? */
+		#ifdef _BSD_SOURCE
+		long tm_gmtoff; /* time zone’s offset from
+		GMT */
+		const char *tm_zone; /* time zone
+		abbreviation */
+		#endif /* _BSD_SOURCE */
+	};
+	
+	clockid_t
+	CLOCK_MONOTONIC		//系统启动时间
+	CLOCK_PROCESS_CPUTIME_ID	//进程时间
+	CLOCK_REALTIME		//真实时间
+	CLOCK_THREAD_CPUTIME ID		//线程时间
+
+	//获取大纪元以来用秒计的秒数
+	time_t time (time_t *t);
+	//获取当前时间
+	int gettimeofday (struct timeval *tv, struct timezone *tz);
+	int clock_gettime (clockid_t clock_id, struct timespec *ts);
+	
+	设置时间
+	int stime (time_t *t);
+	int settimeofday (const struct timeval *tv , const struct timezone *tz);
+	int clock_settime (clockid_t clock_id, const struct timespec *ts);
+	
+	tm转成字符串
+	char * asctime (const struct tm *tm);	//线程不安全
+	char * asctime_r (const struct tm *tm, char *buf);	//线程安全
+	
+	tm转time_t
+	time_t mktime (struct tm *tm);
+	
+	time_t转字符串
+	char * ctime (const time_t *timep);
+	char * ctime_r (const time_t *timep, char *buf);
+	
+	time_t转tm
+	struct tm * gmtime (const time_t *timep);
+	struct tm * gmtime_r (const time_t *timep, struct tm *result);
+	
+	struct tm * localtime (const time_t *timep);
+	struct tm * localtime_r (const time_t *timep, struct tm *result);
+	
+	睡眠
+	unsigned int sleep (unsigned int seconds);
+	int usleep (useconds_t usec);
+	int nanosleep (const struct timespec *req, struct timespec *rem);
+	int clock_nanosleep (clockid_t clock_id, int flags, const struct timespec *req, struct timespec *rem);
+	
+	定时器
+	unsigned int alarm (unsigned int seconds); //固定时间发送 SIGALRM信号
+	int getitimer (int which, struct itimerval *value);
+	int setitimer (int which, const struct itimerval *value, struct itimerval *ovalue);
+	高级定时器
+	int timer_create (clockid_t clockid, struct sigevent *evp, timer_t *timerid);
+	int timer_settime (timer_t timerid, int flags, const struct itimerspec *value, struct itimerspec *ovalue);
+	int timer_delete (timer_t timerid);
+	
+	
+	
+	
+	
+	
+	
+	
+	
